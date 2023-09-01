@@ -19,38 +19,29 @@
  *
 */
 
-/* global cordova, FileSystem */
-
 var argscheck = require('cordova/argscheck'),
-    exec = require('cordova/exec'),
     FileTransferError = require('./FileTransferError'),
-    ProgressEvent = require('cordova-plugin-file.ProgressEvent');
+    xhrImpl = require('./BB10XHRImplementation');
 
-function newProgressEvent(result) {
-    var pe = new ProgressEvent();
-    pe.lengthComputable = result.lengthComputable;
-    pe.loaded = result.loaded;
-    pe.total = result.total;
-    return pe;
-}
-
-function getUrlCredentials(urlString) {
-    var credentialsPattern = /^https?\:\/\/(?:(?:(([^:@\/]*)(?::([^@\/]*))?)?@)?([^:\/?#]*)(?::(\d*))?).*$/,
-        credentials = credentialsPattern.exec(urlString);
-
-    return credentials && credentials[1];
-}
 
 function getBasicAuthHeader(urlString) {
     var header =  null;
 
-
-    // This is changed due to MS Windows doesn't support credentials in http uris
-    // so we detect them by regexp and strip off from result url
-    // Proof: http://social.msdn.microsoft.com/Forums/windowsapps/en-US/a327cf3c-f033-4a54-8b7f-03c56ba3203f/windows-foundation-uri-security-problem
-
     if (window.btoa) {
-        var credentials = getUrlCredentials(urlString);
+        // parse the url using the Location object
+        var url = document.createElement('a');
+        url.href = urlString;
+
+        var credentials = null;
+        var protocol = url.protocol + "//";
+        var origin = protocol + url.host;
+
+        // check whether there are the username:password credentials in the url
+        if (url.href.indexOf(origin) !== 0) { // credentials found
+            var atIndex = url.href.indexOf("@");
+            credentials = url.href.substring(protocol.length, atIndex);
+        }
+
         if (credentials) {
             var authHeader = "Authorization";
             var authHeaderValue = "Basic " + window.btoa(credentials);
@@ -63,20 +54,6 @@ function getBasicAuthHeader(urlString) {
     }
 
     return header;
-}
-
-function convertHeadersToArray(headers) {
-    var result = [];
-    for (var header in headers) {
-        if (headers.hasOwnProperty(header)) {
-            var headerValue = headers[header];
-            result.push({
-                name: header,
-                value: headerValue.toString()
-            });
-        }
-    }
-    return result;
 }
 
 var idCounter = 0;
@@ -112,8 +89,6 @@ FileTransfer.prototype.upload = function(filePath, server, successCallback, erro
     var httpMethod = null;
     var basicAuthHeader = getBasicAuthHeader(server);
     if (basicAuthHeader) {
-        server = server.replace(getUrlCredentials(server) + '@', '');
-
         options = options || {};
         options.headers = options.headers || {};
         options.headers[basicAuthHeader.name] = basicAuthHeader.value;
@@ -141,13 +116,8 @@ FileTransfer.prototype.upload = function(filePath, server, successCallback, erro
         }
     }
 
-    if (cordova.platformId === "windowsphone") {
-        headers = headers && convertHeadersToArray(headers);
-        params = params && convertHeadersToArray(params);
-    }
-
     var fail = errorCallback && function(e) {
-        var error = new FileTransferError(e.code, e.source, e.target, e.http_status, e.body, e.exception);
+        var error = new FileTransferError(e.code, e.source, e.target, e.http_status, e.body);
         errorCallback(error);
     };
 
@@ -155,7 +125,7 @@ FileTransfer.prototype.upload = function(filePath, server, successCallback, erro
     var win = function(result) {
         if (typeof result.lengthComputable != "undefined") {
             if (self.onprogress) {
-                self.onprogress(newProgressEvent(result));
+                self.onprogress(result);
             }
         } else {
             if (successCallback) {
@@ -163,7 +133,7 @@ FileTransfer.prototype.upload = function(filePath, server, successCallback, erro
             }
         }
     };
-    exec(win, fail, 'FileTransfer', 'upload', [filePath, server, fileKey, fileName, mimeType, params, trustAllHosts, chunkedMode, headers, this._id, httpMethod]);
+    xhrImpl.upload(win, fail, [filePath, server, fileKey, fileName, mimeType, params, trustAllHosts, chunkedMode, headers, this._id, httpMethod]);
 };
 
 /**
@@ -181,8 +151,6 @@ FileTransfer.prototype.download = function(source, target, successCallback, erro
 
     var basicAuthHeader = getBasicAuthHeader(source);
     if (basicAuthHeader) {
-        source = source.replace(getUrlCredentials(source) + '@', '');
-
         options = options || {};
         options.headers = options.headers || {};
         options.headers[basicAuthHeader.name] = basicAuthHeader.value;
@@ -193,39 +161,22 @@ FileTransfer.prototype.download = function(source, target, successCallback, erro
         headers = options.headers || null;
     }
 
-    if (cordova.platformId === "windowsphone" && headers) {
-        headers = convertHeadersToArray(headers);
-    }
-
     var win = function(result) {
         if (typeof result.lengthComputable != "undefined") {
             if (self.onprogress) {
-                return self.onprogress(newProgressEvent(result));
+                return self.onprogress(result);
             }
         } else if (successCallback) {
-            var entry = null;
-            if (result.isDirectory) {
-                entry = new (require('cordova-plugin-file.DirectoryEntry'))();
-            }
-            else if (result.isFile) {
-                entry = new (require('cordova-plugin-file.FileEntry'))();
-            }
-            entry.isDirectory = result.isDirectory;
-            entry.isFile = result.isFile;
-            entry.name = result.name;
-            entry.fullPath = result.fullPath;
-            entry.filesystem = new FileSystem(result.filesystemName || (result.filesystem == window.PERSISTENT ? 'persistent' : 'temporary'));
-            entry.nativeURL = result.nativeURL;
-            successCallback(entry);
+            successCallback(result);
         }
     };
 
     var fail = errorCallback && function(e) {
-        var error = new FileTransferError(e.code, e.source, e.target, e.http_status, e.body, e.exception);
+        var error = new FileTransferError(e.code, e.source, e.target, e.http_status, e.body);
         errorCallback(error);
     };
 
-    exec(win, fail, 'FileTransfer', 'download', [source, target, trustAllHosts, this._id, headers]);
+    xhrImpl.download(win, fail, [source, target, trustAllHosts, this._id, headers]);
 };
 
 /**
@@ -233,7 +184,7 @@ FileTransfer.prototype.download = function(source, target, successCallback, erro
  * callback for the file transfer will be called if necessary.
  */
 FileTransfer.prototype.abort = function() {
-    exec(null, null, 'FileTransfer', 'abort', [this._id]);
+    xhrImpl.abort(null, null, [this._id]);
 };
 
 module.exports = FileTransfer;
